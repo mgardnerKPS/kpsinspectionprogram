@@ -162,7 +162,7 @@ const STATE = {
   screen:'home',           // home | subtype | header | session | report
   inspectionType:null,     // 'exterior' | 'interior' | 'daily' | 'punch' | 'final'
   subType:null,            // roofing|siding|decks|painting|carpentry
-  header:{property:'',address:'',contact:'',po:'',date:'',name:''},
+  header:{property:'',address:'',contact:'',po:'',date:'',name:'',projectId:''},
   buildings:[],            // exterior / daily / punch / final
   units:[],                // interior
   activeIndex:null,        // which building/unit is open
@@ -338,6 +338,9 @@ function screenHeader(){
     <div>
       <div class="card">
         <h3>Property / Job Information</h3>
+        <label>Project ID *</label>
+        <input type="text" id="f_projectId" value="${h.projectId}" placeholder="e.g. SwanLake-2026-001">
+        <div class="hint">Format: PropertyName-Year of RFP-Sequence #. Determines the SharePoint folder this report is filed under.</div>
         <label>Property Name *</label>
         <input type="text" id="f_property" value="${h.property}">
         <label>Address *</label>
@@ -358,7 +361,7 @@ function screenHeader(){
   return wrap;
 }
 function submitHeader(){
-  const ids=['property','address','contact','po','date','name'];
+  const ids=['projectId','property','address','contact','po','date','name'];
   let ok=true;
   ids.forEach(id=>{
     const inp=document.getElementById('f_'+id);
@@ -406,7 +409,7 @@ function sessionBuildingBased(){
         <button class="btn btn-secondary" ${STATE.buildings.length===0?'disabled':''} onclick="generateReport()">Download PDF</button>
       </div>
       <div style="height:8px"></div>
-      <button class="btn btn-primary" ${STATE.buildings.length===0?'disabled':''} onclick="saveToOneDrive()">&#9729; Save to OneDrive</button>
+      <button class="btn btn-primary" ${STATE.buildings.length===0?'disabled':''} onclick="saveToOneDrive()">&#9729; Save to SharePoint</button>
     </div>`);
   wrap.appendChild(bar);
   return wrap;
@@ -724,7 +727,7 @@ function sessionInterior(){
         <button class="btn btn-secondary" ${STATE.units.length===0?'disabled':''} onclick="generateReport()">Download PDF</button>
       </div>
       <div style="height:8px"></div>
-      <button class="btn btn-primary" ${STATE.units.length===0?'disabled':''} onclick="saveToOneDrive()">&#9729; Save to OneDrive</button>
+      <button class="btn btn-primary" ${STATE.units.length===0?'disabled':''} onclick="saveToOneDrive()">&#9729; Save to SharePoint</button>
     </div>`));
   return wrap;
 }
@@ -798,7 +801,7 @@ function sessionPunch(){
         <button class="btn btn-secondary" ${STATE.buildings.length===0?'disabled':''} onclick="generateReport()">Download PDF</button>
       </div>
       <div style="height:8px"></div>
-      <button class="btn btn-primary" ${STATE.buildings.length===0?'disabled':''} onclick="saveToOneDrive()">&#9729; Save to OneDrive</button>
+      <button class="btn btn-primary" ${STATE.buildings.length===0?'disabled':''} onclick="saveToOneDrive()">&#9729; Save to SharePoint</button>
     </div>`));
   return wrap;
 }
@@ -987,7 +990,7 @@ function generateReport(){
   showToast('Report downloaded.');
 }
  
-/* Single PDF for exactly one building/unit — used for the OneDrive per-building upload */
+/* Single PDF for exactly one building/unit — used for the SharePoint per-building upload */
 function buildEntityPdfBlob(entity, label){
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({unit:'pt', format:'letter'});
@@ -1029,7 +1032,7 @@ function initMsal(){
   try{
     msalInstance = new msal.PublicClientApplication({
       auth:{
-        clientId:'bf2fe5ed-142a-4a55-ae6f-e8ed5a181dd0',
+        clientId:'cb076a13-5e15-4ae7-80cb-68bdd077aea2',
         authority:'https://login.microsoftonline.com/1979066b-105d-423c-9941-42fcd5ac0752',
         redirectUri: window.location.origin + window.location.pathname
       },
@@ -1040,7 +1043,20 @@ function initMsal(){
   }catch(e){ console.error('MSAL init failed', e); }
 }
  
-const GRAPH_SCOPES = ['User.Read','Files.ReadWrite'];
+const GRAPH_SCOPES = ['User.Read','Sites.ReadWrite.All'];
+let siteDriveId = null;
+ 
+async function getSiteDriveId(token){
+  if(siteDriveId) return siteDriveId;
+  const res = await graphFetch(
+    'https://graph.microsoft.com/v1.0/sites/kellyspropertyservices.sharepoint.com:/sites/KPSAppSuite:/drive',
+    token
+  );
+  if(!res.ok) throw new Error('Could not resolve KPS App Suite SharePoint drive ('+res.status+')');
+  const j = await res.json();
+  siteDriveId = j.id;
+  return siteDriveId;
+}
  
 async function signInMsGraph(){
   if(!msalInstance){ showToast('Microsoft sign-in is not available.'); return; }
@@ -1077,17 +1093,17 @@ async function graphFetch(url, token, options={}){
 }
  
 /* Create a folder under parentId if it doesn't already exist; return its item id */
-async function ensureFolder(token, parentId, name){
+async function ensureFolder(token, driveId, parentId, name){
   const clean = sanitizeName(name);
   const createRes = await graphFetch(
-    `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}/children`, token,
+    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${parentId}/children`, token,
     { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({name:clean, folder:{}, '@microsoft.graph.conflictBehavior':'fail'}) }
   );
   if(createRes.status===201){ const j = await createRes.json(); return j.id; }
   if(createRes.status===409){
     const listRes = await graphFetch(
-      `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}/children?$select=id,name`, token
+      `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${parentId}/children?$select=id,name`, token
     );
     const listJ = await listRes.json();
     const match = (listJ.value||[]).find(it=>it.name.toLowerCase()===clean.toLowerCase());
@@ -1095,9 +1111,9 @@ async function ensureFolder(token, parentId, name){
   }
   throw new Error('Could not create/find folder "'+clean+'" ('+createRes.status+')');
 }
-async function ensurePath(token, segments){
+async function ensurePath(token, driveId, segments){
   let parentId = 'root';
-  for(const seg of segments){ parentId = await ensureFolder(token, parentId, seg); }
+  for(const seg of segments){ parentId = await ensureFolder(token, driveId, parentId, seg); }
   return parentId;
 }
  
@@ -1112,11 +1128,11 @@ function dataURLtoBlob(dataurl){
 }
  
 /* Upload a file into a folder. Simple PUT for <4MB, resumable upload session above that. */
-async function uploadFile(token, parentId, filename, blob){
+async function uploadFile(token, driveId, parentId, filename, blob){
   const clean = sanitizeName(filename);
   if(blob.size <= 4*1024*1024){
     const res = await graphFetch(
-      `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${encodeURIComponent(clean)}:/content`,
+      `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${parentId}:/${encodeURIComponent(clean)}:/content`,
       token, { method:'PUT', headers:{'Content-Type': blob.type||'application/octet-stream'}, body: blob }
     );
     if(!res.ok) throw new Error('Upload failed for '+clean+' ('+res.status+')');
@@ -1124,7 +1140,7 @@ async function uploadFile(token, parentId, filename, blob){
   }
   // resumable upload session for larger files (combined PDFs with many photos)
   const sessionRes = await graphFetch(
-    `https://graph.microsoft.com/v1.0/me/drive/items/${parentId}:/${encodeURIComponent(clean)}:/createUploadSession`,
+    `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${parentId}:/${encodeURIComponent(clean)}:/createUploadSession`,
     token, { method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({item:{'@microsoft.graph.conflictBehavior':'replace'}}) }
   );
@@ -1152,31 +1168,33 @@ async function saveToOneDrive(){
   const entities = STATE.inspectionType==='interior' ? STATE.units : STATE.buildings;
   if(entities.length===0){ showToast('Add at least one building/unit first.'); return; }
  
-  showToast('Uploading to OneDrive…');
+  showToast('Uploading to SharePoint…');
   try{
     const token = await getGraphToken();
+    const driveId = await getSiteDriveId(token);
     const typeLabel = INSPECTION_TYPES.find(t=>t.key===STATE.inspectionType).label;
-    const propertyFolderId = await ensurePath(token, ['KPS Field Reports', typeLabel, STATE.header.property||'Unnamed Property']);
+    const projectId = STATE.header.projectId || STATE.header.property || 'Unassigned Project';
+    const propertyFolderId = await ensurePath(token, driveId, ['Projects', projectId, 'Inspections', typeLabel]);
  
     for(let i=0;i<entities.length;i++){
       const entity = entities[i];
       const label = entity.name || (STATE.inspectionType==='interior' ? `Unit ${i+1}` : `Building ${i+1}`);
-      const entityFolderId = await ensureFolder(token, propertyFolderId, label);
-      const photosFolderId = await ensureFolder(token, entityFolderId, 'Photos');
+      const entityFolderId = await ensureFolder(token, driveId, propertyFolderId, label);
+      const photosFolderId = await ensureFolder(token, driveId, entityFolderId, 'Photos');
  
       const pdfBlob = buildEntityPdfBlob(entity, label);
-      await uploadFile(token, entityFolderId, sanitizeName(label)+'_Report.pdf', pdfBlob);
+      await uploadFile(token, driveId, entityFolderId, sanitizeName(label)+'_Report.pdf', pdfBlob);
  
       const photos = collectEntityPhotos(entity);
       for(let p=0;p<photos.length;p++){
         const blob = dataURLtoBlob(photos[p]);
-        await uploadFile(token, photosFolderId, `photo_${String(p+1).padStart(3,'0')}.jpg`, blob);
+        await uploadFile(token, driveId, photosFolderId, `photo_${String(p+1).padStart(3,'0')}.jpg`, blob);
       }
     }
-    showToast('Saved to OneDrive: KPS Field Reports / '+typeLabel+' / '+(STATE.header.property||'Unnamed Property'));
+    showToast('Saved to SharePoint: Projects / '+projectId+' / Inspections / '+typeLabel);
   }catch(e){
     console.error(e);
-    showToast('OneDrive upload failed — check connection and try again.');
+    showToast('SharePoint upload failed — check connection and try again.');
   }
 }
  
