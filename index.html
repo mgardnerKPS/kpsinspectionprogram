@@ -162,7 +162,7 @@ const STATE = {
   screen:'home',           // home | subtype | header | session | report
   inspectionType:null,     // 'exterior' | 'interior' | 'daily' | 'punch' | 'final'
   subType:null,            // roofing|siding|decks|painting|carpentry
-  header:{property:'',address:'',contact:'',po:'',date:'',name:''},
+  header:{property:'',projectId:'',address:'',contact:'',po:'',date:'',name:'',projectIdDirty:false},
   buildings:[],            // exterior / daily / punch / final
   units:[],                // interior
   activeIndex:null,        // which building/unit is open
@@ -276,7 +276,7 @@ function crumbText(){
 }
 function goBack(){
   if(STATE.screen==='report'){ STATE.screen='session'; }
-  else if(STATE.screen==='session'){ STATE.screen = STATE.inspectionType==='exterior' ? 'subtype':'home'; STATE.header={property:'',address:'',contact:'',po:'',date:'',name:''}; STATE.buildings=[]; STATE.units=[]; }
+  else if(STATE.screen==='session'){ STATE.screen = STATE.inspectionType==='exterior' ? 'subtype':'home'; STATE.header={property:'',projectId:'',address:'',contact:'',po:'',date:'',name:'',projectIdDirty:false}; STATE.buildings=[]; STATE.units=[]; }
   else if(STATE.screen==='header'){ STATE.screen = STATE.inspectionType==='exterior' ? 'subtype':'home'; }
   else if(STATE.screen==='subtype'){ STATE.screen='home'; STATE.inspectionType=null; }
   render();
@@ -332,6 +332,15 @@ function screenSubtype(){
 function selectSubtype(key){ STATE.subType=key; STATE.screen='header'; render(); }
 
 /* ---------------- HEADER (mandatory job info) ---------------- */
+const CURRENT_YEAR = new Date().getFullYear();
+function slugifyProjectName(str){
+  const clean = String(str||'').replace(/[^a-zA-Z0-9]+/g,'');
+  return clean.substring(0,30) || '';
+}
+function suggestedProjectId(propertyName){
+  const slug = slugifyProjectName(propertyName);
+  return slug ? `${slug}-${CURRENT_YEAR}-001` : '';
+}
 function screenHeader(){
   const h = STATE.header;
   const wrap = el(`
@@ -340,6 +349,9 @@ function screenHeader(){
         <h3>Property / Job Information</h3>
         <label>Property Name *</label>
         <input type="text" id="f_property" value="${h.property}">
+        <label>Project ID *</label>
+        <input type="text" id="f_projectId" value="${h.projectId}" placeholder="e.g. ArborGlen-${CURRENT_YEAR}-001">
+        <div class="hint">Auto-filled from the property name + current year — edit if needed. Used as the SharePoint folder name.</div>
         <label>Address *</label>
         <input type="text" id="f_address" value="${h.address}">
         <label>Contact *</label>
@@ -353,12 +365,19 @@ function screenHeader(){
         <div class="hint">All fields are required to continue.</div>
       </div>
     </div>`);
+  const propInput = wrap.querySelector('#f_property');
+  const idInput = wrap.querySelector('#f_projectId');
+  if(!h.projectId && !h.projectIdDirty){ idInput.value = suggestedProjectId(propInput.value); }
+  propInput.addEventListener('input', ()=>{
+    if(!STATE.header.projectIdDirty) idInput.value = suggestedProjectId(propInput.value);
+  });
+  idInput.addEventListener('input', ()=>{ STATE.header.projectIdDirty = true; });
   const bar = el(`<div class="bottombar"><button class="btn btn-primary" onclick="submitHeader()">Continue</button></div>`);
   wrap.appendChild(bar);
   return wrap;
 }
 function submitHeader(){
-  const ids=['property','address','contact','po','date','name'];
+  const ids=['property','projectId','address','contact','po','date','name'];
   let ok=true;
   ids.forEach(id=>{
     const inp=document.getElementById('f_'+id);
@@ -1173,7 +1192,8 @@ async function saveToTeamDrive(){
     const token = await getGraphToken();
     const driveId = await getTeamDriveId(token);
     const typeLabel = INSPECTION_TYPES.find(t=>t.key===STATE.inspectionType).label;
-    const propertyFolderId = await ensurePath(token, driveId, ['KPS Field Reports', typeLabel, STATE.header.property||'Unnamed Property']);
+    const projectId = STATE.header.projectId || 'Unassigned';
+    const propertyFolderId = await ensurePath(token, driveId, ['Projects', projectId, 'Inspections', typeLabel]);
 
     for(let i=0;i<entities.length;i++){
       const entity = entities[i];
@@ -1190,7 +1210,7 @@ async function saveToTeamDrive(){
         await uploadFile(token, driveId, photosFolderId, `photo_${String(p+1).padStart(3,'0')}.jpg`, blob);
       }
     }
-    showToast('Saved to Team Drive: KPS Field Reports / '+typeLabel+' / '+(STATE.header.property||'Unnamed Property'));
+    showToast('Saved to Team Drive: Projects / '+projectId+' / Inspections / '+typeLabel);
   }catch(e){
     console.error(e);
     showToast('OneDrive upload failed — check connection and try again.');
